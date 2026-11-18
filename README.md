@@ -98,8 +98,9 @@ that combines:
     aligned with business domains (bounded contexts).
 -   Give each service ownership of its own data, with no shared tables
     between services.
--   Implement secure authentication and role-based authorization that
-    every service enforces independently.
+-   Implement secure authentication and a permission-based authorization
+    model, in which roles are configurable data and every service enforces
+    permissions independently.
 -   Use Apache Kafka for event-driven, asynchronous communication between
     services.
 -   Build separate AI services for document ingestion and RAG
@@ -109,15 +110,27 @@ that combines:
 
 ## 4. Main Features
 
-### 4.1 Authentication and user management
+### 4.1 Authentication, access control, and user management
 
--   User sign-in and sign-out.
--   User profiles.
--   Role-based access control.
+**Authentication and access control** (Identity & Access Service)
+
+-   User sign-in, sign-out, and token refresh.
+-   Account activation, password management, and account deactivation.
+-   Permission-based access control with **dynamic roles**: administrators
+    create, rename, and delete roles and choose which permissions each
+    role grants, at runtime, without code changes.
+-   Assignment of roles to users, optionally limited to a scope (for
+    example, a department).
 -   Protected application features and API endpoints.
--   Administrative user management.
 
-*Owned by: Identity Service*
+**User and profile management** (User Profile Service)
+
+-   User directory: creating, searching, and viewing users.
+-   Personal profile: consulting and updating one's own information.
+-   Organizational attributes: department, programme, staff unit.
+
+See [8. Security and Access Control](#8-security-and-access-control) for
+the permission model.
 
 ### 4.2 Institutional document management
 
@@ -211,38 +224,38 @@ services (such as the AI Service) are never exposed through the gateway.
 ### High-level architecture
 
 ``` text
-                              ┌─────────────────────────────┐
-                              │      Angular Web Client     │
-                              └─────────────────────────────┘
-                                             │ HTTPS / REST + JWT
-                                             ▼
-                              ┌─────────────────────────────┐
-                              │      Nginx API Gateway      │
-                              │ TLS · routing · rate limits │
-                              │ request IDs · upload limits │
-                              └─────────────────────────────┘
-                                             │ path-based routing /api/v1/...
-      ┌────────────┬────────────┬────────────┼────────────┬────────────┬────────────┐
-      ▼            ▼            ▼            ▼            ▼            ▼            ▼
- ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
- │ Identity │ │ Document │ │ Request  │ │Assistant │ │ Notifi-  │ │  Audit   │ │Reporting │
- │ Service  │ │ Service  │ │ Service  │ │ Service  │ │cation Svc│ │ Service  │ │ Service  │
- └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘
-      │            │            │            │            │            │            │
-      ▼            ▼            ▼            ▼            ▼            ▼            ▼
- ════════════════════════════════════════════════════════════════════════════════════════
-       Apache Kafka — domain events · commands · retry / dead-letter topics
- ════════════════════════════════════════════════════════════════════════════════════════
-                    ▼ ▲  DocumentProcessingRequested (in) · DocumentIndexed / ...Failed (out)
- ┌─ AI bounded context (Python) ────────────────────────────────────────────────────────┐
- │      ┌──────────────────────────┐              ┌──────────────────────────┐          │
- │      │     Ingestion Worker     │              │   AI Service (FastAPI)   │          │
- │      │ extract · chunk · embed  │              │  embed · retrieve · LLM  │          │
- │      └──────────────────────────┘              └──────────────────────────┘          │
- │                                                                                      │
- │  AI Service is internal only: called by Assistant Service over REST,                 │
- │  never exposed by Nginx. Both processes own the vector store (pgvector).             │
- └──────────────────────────────────────────────────────────────────────────────────────┘
+                                 ┌─────────────────────────────┐
+                                 │      Angular Web Client     │
+                                 └─────────────────────────────┘
+                                                │ HTTPS / REST + JWT
+                                                ▼
+                                 ┌─────────────────────────────┐
+                                 │      Nginx API Gateway      │
+                                 │ TLS · routing · rate limits │
+                                 │ request IDs · upload limits │
+                                 └─────────────────────────────┘
+                                                │ path-based routing /api/v1/...
+      ┌───────────┬───────────┬───────────┬─────┴─────┬───────────┬───────────┬───────────┐
+      ▼           ▼           ▼           ▼           ▼           ▼           ▼           ▼
+ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
+ │ Identity│ │   User  │ │ Document│ │ Request │ │Assistant│ │ Notifi- │ │  Audit  │ │Reporting│
+ │ & Access│ │ Profile │ │ Service │ │ Service │ │ Service │ │  cation │ │ Service │ │ Service │
+ └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘
+      │           │           │           │           │           │           │           │
+      ▼           ▼           ▼           ▼           ▼           ▼           ▼           ▼
+ ════════════════════════════════════════════════════════════════════════════════════════════════
+           Apache Kafka — domain events · commands · retry / dead-letter topics
+ ════════════════════════════════════════════════════════════════════════════════════════════════
+                     ▼ ▲  DocumentProcessingRequested (in) · DocumentIndexed / ...Failed (out)
+ ┌─ AI bounded context (Python) ────────────────────────────────────────────────────────────────┐
+ │      ┌──────────────────────────┐                  ┌──────────────────────────┐              │
+ │      │     Ingestion Worker     │                  │   AI Service (FastAPI)   │              │
+ │      │ extract · chunk · embed  │                  │  embed · retrieve · LLM  │              │
+ │      └──────────────────────────┘                  └──────────────────────────┘              │
+ │                                                                                              │
+ │  AI Service is internal only: called by Assistant Service over REST,                         │
+ │  never exposed by Nginx. Both processes own the vector store (pgvector).                     │
+ └──────────────────────────────────────────────────────────────────────────────────────────────┘
 
         Data: PostgreSQL (one database per service; pgvector for the AI context)
         Files: MinIO (one bucket per owning service)
@@ -258,7 +271,8 @@ implementation.
 
 | Service | Stack | Responsibility | Owned data | Main events published |
 |---|---|---|---|---|
-| **Identity Service** | Spring Boot | Sign-in, sign-out, token issuance and refresh, users, roles, permissions, profiles | `identity_db`: User, Role, Permission, refresh tokens | `UserCreated`, `UserUpdated`, `UserDeactivated`, `RoleAssigned` |
+| **Identity & Access Service** | Spring Boot | Credentials, sign-in, sign-out, token issuance and refresh, JWKS, account status, permission catalogue, dynamic roles, role–permission mapping, user–role assignments with scope | `identity_db`: Account, Credential, Permission, Role, RolePermission, RoleAssignment, refresh tokens | `AccountActivated`, `AccountDeactivated`, `RoleAssigned`, `RoleRevoked`, `RolePermissionsChanged` |
+| **User Profile Service** | Spring Boot | User directory, personal profiles, organizational attributes (department, programme, staff unit), self-service profile updates | `user_db`: UserProfile, Department, Programme | `UserRegistered`, `UserProfileUpdated` |
 | **Document Service** | Spring Boot | Document upload, metadata, categories, versions, access rules, logical deletion, indexing status | `document_db`: Document, DocumentVersion, Category, access rules; MinIO bucket `university-documents` | `DocumentUploaded`, `DocumentProcessingRequested`, `DocumentAccessChanged`, `DocumentDeleted` |
 | **Request Service** | Spring Boot | Request submission, assignment, status state machine, comments, history, attachments | `request_db`: AdministrativeRequest, RequestComment, status history; MinIO bucket `request-attachments` | `RequestSubmitted`, `RequestAssigned`, `RequestStatusChanged`, `RequestCommentAdded` |
 | **Assistant Service** | Spring Boot | Conversations, chat messages, retention policy, orchestration of RAG calls | `assistant_db`: Conversation, ChatMessage, cited sources | `AssistantQuestionAnswered` |
@@ -267,6 +281,12 @@ implementation.
 | **Notification Service** | Spring Boot | Consumes domain events and explicit `NotificationRequested` commands, creates in-app notifications, manages preferences, later sends email | `notification_db`: Notification, preferences, delivery records | — |
 | **Audit Service** | Spring Boot | Consumes audit-relevant events from all services into an append-only log; exposes audit queries to authorized users | `audit_db`: AuditLog | — |
 | **Reporting Service** | Spring Boot | Builds read models from domain events to serve dashboard statistics without querying other services' databases | `reporting_db`: aggregated indicators | — |
+
+The Identity & Access Service and the User Profile Service are separate
+on purpose: the first answers *"who is this and what may they do?"*, the
+second answers *"who is this person in the university?"*. Both use the
+same user ID, generated once by the User Profile Service when a user is
+registered.
 
 The Ingestion Worker and the AI Service are two processes of the same
 bounded context: they are built from the same Python codebase and share
@@ -326,7 +346,7 @@ the vector store. No other service reads or writes `ai_db`.
 | Document / Request Service | MinIO | S3 API | Store and serve files |
 | Ingestion Worker | MinIO | S3 API (read-only) | Fetch documents to index |
 | Each service | Its own PostgreSQL database | JPA / Hibernate or SQL driver | Persistence |
-| All services | Identity Service | JWKS endpoint (cached) | Fetch the public key to verify JWTs |
+| All services | Identity & Access Service | JWKS endpoint (cached) | Fetch the public key to verify JWTs |
 | Prometheus | All services | Metrics scraping | Monitoring |
 
 ### Gateway routing
@@ -334,7 +354,8 @@ the vector store. No other service reads or writes `ai_db`.
 | Path prefix | Target service |
 |---|---|
 | `/` | Angular application |
-| `/api/v1/auth`, `/api/v1/users` | Identity Service |
+| `/api/v1/auth`, `/api/v1/access` | Identity & Access Service |
+| `/api/v1/users` | User Profile Service |
 | `/api/v1/documents` | Document Service |
 | `/api/v1/requests` | Request Service |
 | `/api/v1/assistant` | Assistant Service |
@@ -363,7 +384,8 @@ Planned topics:
 
 | Topic | Producer | Consumers | Key |
 |---|---|---|---|
-| `identity.user.events` | Identity Service | Request, Notification, Audit, Reporting | userId |
+| `identity.events` | Identity & Access Service | Request, Notification, Audit, Reporting | userId |
+| `user.events` | User Profile Service | Identity & Access, Request, Notification, Audit, Reporting | userId |
 | `document.events` | Document Service | Ingestion Worker, Notification, Audit, Reporting | documentId |
 | `document.processing.results` | Ingestion Worker | Document Service, Notification, Reporting | documentId |
 | `request.events` | Request Service | Notification, Audit, Reporting | requestId |
@@ -492,6 +514,34 @@ interface is not sufficient security.
     update statistics.
 8.  The student can consult the updated status.
 
+### 7.4 User registration and onboarding
+
+1.  An administrator creates a user in the **User Profile Service**
+    (identity data, department, programme) and selects initial roles.
+2.  The User Profile Service persists the profile, generates the user ID,
+    and publishes `UserRegistered` with the requested initial roles.
+3.  The **Identity & Access Service** consumes the event, creates the
+    account in `PENDING_ACTIVATION` state, assigns the roles, and
+    publishes a `NotificationRequested` command with a one-time activation
+    link.
+4.  The user sets a password through the activation link; the account
+    becomes `ACTIVE` and `AccountActivated` is published.
+5.  Deactivation happens in the Identity & Access Service: the account is
+    blocked, refresh tokens are revoked, and `AccountDeactivated` is
+    published so other services can update their local data.
+
+### 7.5 Changing what a role can do
+
+1.  An administrator with the `role:manage` permission edits a role in
+    the administration screen: adds or removes permissions, or creates a
+    new role.
+2.  The Identity & Access Service validates that every permission exists
+    in the catalogue, saves the change, writes an audit record, and
+    publishes `RolePermissionsChanged`.
+3.  Users holding the role get the new permissions in their next access
+    token (at the latest when the short-lived token expires and is
+    refreshed). No service is redeployed.
+
 ------------------------------------------------------------------------
 
 ## 8. Security and Access Control
@@ -503,15 +553,16 @@ each one enforces security on its own.
 
 Planned security controls include:
 
--   Authentication and secure password storage in the Identity Service.
+-   Authentication and secure password storage (BCrypt or Argon2) in the
+    Identity & Access Service. Profile data never contains credentials.
 -   Short-lived JWT access tokens signed with an asymmetric key by the
-    Identity Service; every service verifies signatures with the public
-    key published on a JWKS endpoint, so no service needs to call the
-    Identity Service on each request.
--   Refresh tokens stored and revocable by the Identity Service; user
-    deactivation is published as `UserDeactivated`.
--   Role-based access control (RBAC) with permissions carried as token
-    claims.
+    Identity & Access Service; every service verifies signatures with the
+    public key published on a JWKS endpoint, so no service needs to call
+    the Identity & Access Service on each request.
+-   Refresh tokens stored and revocable by the Identity & Access Service;
+    account deactivation is published as `AccountDeactivated`.
+-   Permission-based access control: tokens carry the user's effective
+    permissions, and services check **permissions, never role names**.
 -   Backend authorization in every service for every protected
     operation, including resource-ownership checks (for example, a
     student cannot read another student's request by changing an ID in
@@ -534,18 +585,123 @@ Planned security controls include:
     treated as instructions, and authorization filters are applied
     before any passage reaches the LLM.
 
-Roles and permissions will be finalized with the functional
-requirements. Possible roles include:
+### 8.1 Permission-based access model
 
-| Role | Typical responsibilities |
+The access model separates three things:
+
+| Concept | What it is | Who defines it | Can change at runtime? |
+|---|---|---|---|
+| **Permission** | One action on one type of resource, optionally limited by scope (for example `request:process:department`) | Developers, because code checks it | No — added with the code that uses it |
+| **Role** | A named bundle of permissions (for example "Agent administratif") | Administrators, through the administration screen | **Yes** — create, rename, delete, change permissions |
+| **Role assignment** | A user holding a role, optionally within a scope value (for example department `scolarite`) | Administrators | **Yes** |
+
+**Rule:** application code never checks a role name. It checks permissions
+only, for example `hasAuthority("request:process")`. Roles are therefore
+pure data: adding a new role such as "Responsable de stages" means
+creating it and ticking its permissions — no code change, no redeployment.
+
+#### Permission naming
+
+Permissions follow the format `resource:action[:scope]`.
+
+| Scope | Meaning |
 |---|---|
-| Student | Consult accessible documents, use the assistant, submit and track personal requests |
-| Administrative Staff | Process requests assigned to their scope |
-| Document Manager | Upload and manage institutional documents |
-| Administrator | Manage users, roles, configuration, and platform operations |
+| `own` | Only resources the user created or owns |
+| `assigned` | Only resources explicitly assigned to the user |
+| `department` | Resources belonging to the department(s) of the role assignment |
+| `all` | All resources of that type |
 
-The final permission model should be based on actions and resource
-scope, not simply on frontend pages.
+When a permission has no scope, it applies globally.
+
+#### Permission catalogue (initial)
+
+Each service declares the permissions it checks. The Identity & Access
+Service stores the catalogue (seeded through database migrations) so
+administrators can pick from it.
+
+| Service | Permissions |
+|---|---|
+| Identity & Access | `role:read`, `role:manage`, `role:assign`, `account:manage` |
+| User Profile | `user:read:own`, `user:update:own`, `user:read:all`, `user:create`, `user:update:all` |
+| Document | `document:read:public`, `document:read:restricted`, `document:upload`, `document:update`, `document:delete`, `document:manage-access` |
+| Assistant | `assistant:use` |
+| Request | `request:create`, `request:read:own`, `request:read:assigned`, `request:read:department`, `request:read:all`, `request:process`, `request:assign`, `request:comment` |
+| Audit | `audit:read:department`, `audit:read:all` |
+| Reporting | `report:read:department`, `report:read:all` |
+| Platform | `platform:configure` |
+
+#### Default roles (seed data, editable)
+
+The platform starts with the roles from the requirements specification.
+They are created by a data migration and can be edited, renamed, or
+complemented by administrators afterwards.
+
+| Permission group | Étudiant | Agent administratif | Responsable pédagogique | Administrateur |
+|---|---|---|---|---|
+| Read public documents, use assistant | ✓ | ✓ | ✓ | ✓ |
+| Read and update own profile | ✓ | ✓ | ✓ | ✓ |
+| Submit and follow own requests | ✓ | | | |
+| Process assigned requests | | ✓ | | |
+| Read and process department requests | | | ✓ | ✓ (`all`) |
+| Manage documents | | optional | ✓ | ✓ |
+| Read audit logs | | | optional (`department`) | ✓ (`all`) |
+| Read statistics | | | `department` | `all` |
+| Manage users, roles, and permissions | | | | ✓ |
+
+"Optional" entries match the requirement *"selon droits"*: they are not
+granted by default but can be enabled per role, or a dedicated role can be
+created for them.
+
+#### What the token carries
+
+``` json
+{
+  "sub": "8f2c…-user-id",
+  "roles": ["Agent administratif"],
+  "perms": [
+    "document:read:public",
+    "assistant:use",
+    "request:read:assigned",
+    "request:process"
+  ],
+  "scopes": { "department": ["scolarite"] },
+  "exp": 1763470000
+}
+```
+
+-   `perms` are the **effective permissions**: the union of the
+    permissions of all the user's roles, computed by the Identity &
+    Access Service when the token is issued.
+-   `scopes` carry the scope values from the role assignments, used for
+    `department`-scoped checks.
+-   `roles` are included for display only (for example in the Angular
+    header); no authorization decision uses them.
+-   Access tokens are short-lived (for example 15 minutes), so permission
+    changes take effect at the next refresh.
+
+#### Enforcement in each service
+
+1.  **Permission check:** does the token contain the required permission?
+2.  **Scope check:** for scoped permissions, does the resource match the
+    user (`own`), the assignment (`assigned`), or the department in
+    `scopes` (`department`)?
+3.  **Business rule check:** for example, a request in status `CLOSED`
+    cannot be modified, whatever the permissions.
+
+Document access rules and the RAG retrieval filter use the same model:
+documents carry a visibility level and, optionally, a department, and the
+AI Service filters chunks using the `perms` and `scopes` of the forwarded
+token. They never reference role names, so renaming or adding a role
+cannot break document access.
+
+#### Safeguards
+
+-   Permissions cannot be created or deleted from the UI; only roles can.
+-   At least one active account must always keep `role:manage` and
+    `account:manage`, so administrators cannot lock themselves out.
+-   A role still assigned to users cannot be deleted until it is
+    unassigned or replaced.
+-   Every change to roles, permissions, and assignments is audited.
 
 ------------------------------------------------------------------------
 
@@ -562,11 +718,12 @@ university-platform/
 │   └── angular-app/
 │
 ├── services/
-│   ├── identity-service/          # Spring Boot
+│   ├── identity-service/          # Spring Boot — Identity & Access
 │   │   ├── src/
 │   │   ├── Dockerfile
 │   │   ├── pom.xml
 │   │   └── README.md
+│   ├── user-service/              # Spring Boot — User Profile
 │   ├── document-service/          # Spring Boot
 │   ├── request-service/           # Spring Boot
 │   ├── assistant-service/         # Spring Boot
@@ -745,13 +902,14 @@ python -m app.worker.main
 | Component | Port |
 |---|---|
 | Nginx gateway | 80 / 443 |
-| Identity Service | 8081 |
+| Identity & Access Service | 8081 |
 | Document Service | 8082 |
 | Request Service | 8083 |
 | Assistant Service | 8084 |
 | Notification Service | 8085 |
 | Audit Service | 8086 |
 | Reporting Service | 8087 |
+| User Profile Service | 8088 |
 | AI Service | 8000 (internal) |
 | PostgreSQL | 5432 |
 | Kafka | 9092 |
@@ -784,6 +942,10 @@ IDENTITY_DB_NAME=identity_db
 IDENTITY_DB_USER=identity_user
 IDENTITY_DB_PASSWORD=change_me
 
+USER_DB_NAME=user_db
+USER_DB_USER=user_user
+USER_DB_PASSWORD=change_me
+
 DOCUMENT_DB_NAME=document_db
 DOCUMENT_DB_USER=document_user
 DOCUMENT_DB_PASSWORD=change_me
@@ -815,7 +977,7 @@ AI_DB_PASSWORD=change_me
 # Spring Boot
 SPRING_PROFILES_ACTIVE=dev
 
-# Security (Identity Service signs tokens; others verify via JWKS)
+# Security (Identity & Access Service signs tokens; others verify via JWKS)
 JWT_ISSUER=http://identity-service:8081
 JWT_JWKS_URI=http://identity-service:8081/.well-known/jwks.json
 JWT_ACCESS_TOKEN_TTL=15m
@@ -857,7 +1019,7 @@ at a time so that the platform stays runnable at the end of each phase.
 |---|---|---|
 | 1. Requirements and design | Use cases, roles, domain model, bounded contexts, service boundaries, API and event contracts | Validated functional and technical design |
 | 2. Platform foundation | Monorepo, service template, Docker Compose, Nginx gateway, PostgreSQL with per-service databases, Kafka, MinIO, CI skeleton | Running infrastructure and an empty service deployable end to end |
-| 3. Identity Service | Authentication, users, roles, JWT issuance, JWKS, token verification in the service template | Secured foundation reused by every service |
+| 3. Identity & Access and User Profile services | Authentication, JWT issuance, JWKS, permission catalogue, dynamic roles and assignments, user registration and profiles, token verification in the service template | Secured foundation reused by every service |
 | 4. Document Service | Upload, metadata, categories, MinIO integration, outbox publishing | Usable document repository |
 | 5. AI context: RAG foundation | Ingestion Worker (extraction, chunking, embeddings, pgvector), AI Service retrieval with access filtering | Documents indexed asynchronously and retrievable |
 | 6. Assistant Service | Conversations, LLM integration, prompts, source references, timeouts and failure handling | Conversational assistant |
@@ -883,6 +1045,9 @@ Testing will cover the system at multiple levels.
     PostgreSQL, Kafka, and MinIO containers.
 -   **API tests:** verify request validation, response contracts, and
     authorization for every service.
+-   **Authorization tests:** for each protected endpoint, verify access
+    with and without the required permission, with each scope, and after
+    a role's permissions change.
 -   **Contract tests:** verify that producers and consumers agree on the
     REST APIs in `contracts/openapi/` and the event schemas in
     `contracts/events/`, so that one service can change without breaking
@@ -971,6 +1136,7 @@ Suggested branch naming:
 feature/document-service-upload
 feature/ai-service-retrieval
 feature/request-service-workflow
+feature/identity-dynamic-roles
 fix/identity-service-token-validation
 docs/architecture-overview
 ```
