@@ -7,9 +7,9 @@
 **Project status:** In planning / initial development\
 **Project type:** Academic software engineering project\
 **Proposed architecture:** Microservices — an Angular frontend behind an
-Nginx API gateway, independently deployable Spring Boot services for each
-business domain, and Python AI services, communicating through REST and
-Apache Kafka
+Nginx edge proxy and a Spring Cloud API gateway with service discovery,
+independently deployable Spring Boot services for each business domain,
+and Python AI services, communicating through REST and Apache Kafka
 
 ------------------------------------------------------------------------
 
@@ -217,9 +217,23 @@ capability is implemented as an independently deployable service that
 owns its data, exposes a clear API, and communicates with other services
 through REST (synchronous) or Apache Kafka (asynchronous events).
 
-All external traffic enters through a single **Nginx API gateway**.
-Services are not called directly by the browser, and internal-only
-services (such as the AI Service) are never exposed through the gateway.
+External traffic goes through two layers:
+
+1.  **Nginx (edge proxy):** the only publicly exposed component. It
+    terminates TLS, applies rate limits and upload size limits, generates
+    request IDs, and serves the Angular application.
+2.  **API Gateway (Spring Cloud Gateway):** receives `/api/**` traffic
+    from Nginx and routes each path to a service by its **service ID**,
+    not by a fixed address. Instances are resolved through the
+    **Discovery Server (Eureka)** and balanced client-side with **Spring
+    Cloud LoadBalancer**, so a service can run several instances without
+    any routing change.
+
+All Spring services load their non-secret configuration from the
+**Config Server** at startup and register themselves in the Discovery
+Server. Services are not called directly by the browser, and internal-only
+services (such as the AI Service) are never routed by Nginx or the
+gateway.
 
 ### High-level architecture
 
@@ -227,14 +241,21 @@ services (such as the AI Service) are never exposed through the gateway.
                                  ┌─────────────────────────────┐
                                  │      Angular Web Client     │
                                  └─────────────────────────────┘
-                                                │ HTTPS / REST + JWT
+                                                │ HTTPS
                                                 ▼
-                                 ┌─────────────────────────────┐
-                                 │      Nginx API Gateway      │
-                                 │ TLS · routing · rate limits │
-                                 │ request IDs · upload limits │
-                                 └─────────────────────────────┘
-                                                │ path-based routing /api/v1/...
+                                 ┌─────────────────────────────┐     ┌───────────────────────┐
+                                 │      Nginx — edge proxy     │     │     Config Server     │
+                                 │ TLS · rate limits · req. IDs│     │  Spring Cloud Config  │
+                                 │ upload limits · Angular app │     │ ← every Spring service│
+                                 └─────────────────────────────┘     └───────────────────────┘
+                                                │ /api/**
+                                                ▼
+                                 ┌─────────────────────────────┐     ┌───────────────────────┐
+                                 │         API Gateway         │     │    Discovery Server   │
+                                 │     Spring Cloud Gateway    │◄────│    Eureka registry    │
+                                 │  routing · CORS · JWT check │     │ ← every Spring service│
+                                 └─────────────────────────────┘     └───────────────────────┘
+                                                │ lb://service-id  (Spring Cloud LoadBalancer)
       ┌───────────┬───────────┬───────────┬─────┴─────┬───────────┬───────────┬───────────┐
       ▼           ▼           ▼           ▼           ▼           ▼           ▼           ▼
  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
@@ -254,11 +275,11 @@ services (such as the AI Service) are never exposed through the gateway.
  │      └──────────────────────────┘                  └──────────────────────────┘              │
  │                                                                                              │
  │  AI Service is internal only: called by Assistant Service over REST,                         │
- │  never exposed by Nginx. Both processes own the vector store (pgvector).                     │
+ │  never routed by Nginx or the API Gateway. Both processes own pgvector.                      │
  └──────────────────────────────────────────────────────────────────────────────────────────────┘
 
         Data: PostgreSQL (one database per service; pgvector for the AI context)
-        Files: MinIO (one bucket per owning service)
+        Files: local file storage on Docker volumes (one volume per owning service)
         Observability: Prometheus + Grafana
         Runtime: Docker / Docker Compose
 ```
@@ -267,14 +288,25 @@ This diagram represents the intended logical architecture. The exact
 deployment topology and communication paths may evolve during
 implementation.
 
-### Service catalogue
+### Platform services
+
+| Service | Stack | Responsibility |
+|---|---|---|
+| **API Gateway** | Spring Cloud Gateway | Path-based routing to `lb://<service-id>`, CORS, correlation ID propagation, uniform error responses, early JWT signature and expiry check |
+| **Discovery Server** | Spring Cloud Netflix Eureka | Registry of running service instances used by the gateway and by service-to-service calls |
+| **Config Server** | Spring Cloud Config (native profile) | Centralized, versioned, non-secret configuration served from `infrastructure/config-repo/` |
+| **Nginx** | Nginx | Public entry point: TLS, rate limiting, upload limits, request IDs, Angular static files |
+
+The platform services contain no business logic.
+
+### Business service catalogue
 
 | Service | Stack | Responsibility | Owned data | Main events published |
 |---|---|---|---|---|
 | **Identity & Access Service** | Spring Boot | Credentials, sign-in, sign-out, token issuance and refresh, JWKS, account status, permission catalogue, dynamic roles, role–permission mapping, user–role assignments with scope | `identity_db`: Account, Credential, Permission, Role, RolePermission, RoleAssignment, refresh tokens | `AccountActivated`, `AccountDeactivated`, `RoleAssigned`, `RoleRevoked`, `RolePermissionsChanged` |
 | **User Profile Service** | Spring Boot | User directory, personal profiles, organizational attributes (department, programme, staff unit), self-service profile updates | `user_db`: UserProfile, Department, Programme | `UserRegistered`, `UserProfileUpdated` |
-| **Document Service** | Spring Boot | Document upload, metadata, categories, versions, access rules, logical deletion, indexing status | `document_db`: Document, DocumentVersion, Category, access rules; MinIO bucket `university-documents` | `DocumentUploaded`, `DocumentProcessingRequested`, `DocumentAccessChanged`, `DocumentDeleted` |
-| **Request Service** | Spring Boot | Request submission, assignment, status state machine, comments, history, attachments | `request_db`: AdministrativeRequest, RequestComment, status history; MinIO bucket `request-attachments` | `RequestSubmitted`, `RequestAssigned`, `RequestStatusChanged`, `RequestCommentAdded` |
+| **Document Service** | Spring Boot | Document upload, metadata, categories, versions, access rules, logical deletion, indexing status | `document_db`: Document, DocumentVersion, Category, access rules; files in the `document-storage` volume | `DocumentUploaded`, `DocumentProcessingRequested`, `DocumentAccessChanged`, `DocumentDeleted` |
+| **Request Service** | Spring Boot | Request submission, assignment, status state machine, comments, history, attachments | `request_db`: AdministrativeRequest, RequestComment, status history; files in the `request-attachments-storage` volume | `RequestSubmitted`, `RequestAssigned`, `RequestStatusChanged`, `RequestCommentAdded` |
 | **Assistant Service** | Spring Boot | Conversations, chat messages, retention policy, orchestration of RAG calls | `assistant_db`: Conversation, ChatMessage, cited sources | `AssistantQuestionAnswered` |
 | **AI Service** | Python, FastAPI | Query embedding, vector retrieval with access filtering, prompt construction, LLM generation, citation building, RAG evaluation | `ai_db` (with pgvector): DocumentChunk, embeddings, chunk access metadata | — (called synchronously) |
 | **Ingestion Worker** | Python | Kafka consumer: fetch file, extract text, clean, chunk, embed, store vectors | Shares `ai_db` with the AI Service (same bounded context) | `DocumentIndexed`, `DocumentProcessingFailed` |
@@ -303,9 +335,16 @@ the vector store. No other service reads or writes `ai_db`.
     on a single PostgreSQL instance with separate databases and
     credentials; they can be split onto separate instances later
     without code changes.
--   **API gateway:** Nginx is the single entry point. It handles TLS
-    termination, path-based routing, rate limiting, upload size limits,
-    and request ID generation.
+-   **Two-layer entry point:** Nginx is the single public entry point
+    (TLS, rate limiting, upload limits, request IDs). Spring Cloud Gateway
+    is the internal API gateway (routing by service ID and cross-cutting
+    filters). Routes are configuration, not code.
+-   **Service discovery and client-side load balancing:** services
+    register in Eureka and are called by service ID (`lb://…`). Scaling
+    a service means starting more instances; nothing else changes.
+-   **Centralized configuration:** shared and per-service settings live
+    in the Config Server's repository; secrets stay in environment
+    variables and never enter that repository.
 -   **REST for synchronous operations:** used only when the caller needs
     an immediate answer (for example, the Assistant Service calling the
     AI Service). Every synchronous call has a timeout, limited retries,
@@ -325,8 +364,10 @@ the vector store. No other service reads or writes `ai_db`.
     so that redelivered events are handled once.
 -   **Vector search:** pgvector provides vector similarity search within
     PostgreSQL for the initial RAG implementation.
--   **Object storage:** MinIO stores uploaded files; each owning service
-    stores metadata and object references in its own database.
+-   **File storage behind an interface:** uploaded files are stored
+    through a `DocumentStorage` interface (initially on the local
+    filesystem); each owning service stores file metadata and storage
+    keys in its own database (see [File storage](#file-storage)).
 -   **Defense in depth:** every service validates tokens and enforces
     authorization itself, independently of the gateway and of frontend
     visibility.
@@ -337,31 +378,39 @@ the vector store. No other service reads or writes `ai_db`.
 
 | Source | Destination | Mechanism | Purpose |
 |---|---|---|---|
-| Angular | Nginx gateway | HTTPS / REST | All user operations |
-| Nginx gateway | Business services | HTTP / REST | Routing by path prefix |
+| Angular | Nginx | HTTPS / REST | All user operations |
+| Nginx | API Gateway | HTTP / REST | Forward `/api/**` |
+| API Gateway | Business services | HTTP / REST via `lb://<service-id>` | Routing by path prefix, load balanced |
+| Spring services | Discovery Server | Eureka client | Register and discover instances |
+| Spring services | Config Server | HTTP at startup | Load configuration |
 | Assistant Service | AI Service | HTTP / REST (internal) | Retrieve and generate an answer |
 | Business services | Kafka | Producer (via outbox) | Publish domain events |
 | Business services | Kafka | Consumer | React to other services' events |
 | Ingestion Worker | Kafka | Consumer / Producer | Index documents, report result |
-| Document / Request Service | MinIO | S3 API | Store and serve files |
-| Ingestion Worker | MinIO | S3 API (read-only) | Fetch documents to index |
+| Document / Request Service | Own storage volume | `DocumentStorage` (local filesystem) | Store and serve files |
+| Ingestion Worker | Document storage volume | Read-only mount | Fetch documents to index |
 | Each service | Its own PostgreSQL database | JPA / Hibernate or SQL driver | Persistence |
 | All services | Identity & Access Service | JWKS endpoint (cached) | Fetch the public key to verify JWTs |
 | Prometheus | All services | Metrics scraping | Monitoring |
 
 ### Gateway routing
 
-| Path prefix | Target service |
+Nginx serves `/` (Angular) and forwards `/api/**` to the API Gateway. The
+gateway routes are defined in `infrastructure/config-repo/api-gateway.yml`:
+
+| Path prefix | Target service ID |
 |---|---|
-| `/` | Angular application |
-| `/api/v1/auth`, `/api/v1/access` | Identity & Access Service |
-| `/api/v1/users` | User Profile Service |
-| `/api/v1/documents` | Document Service |
-| `/api/v1/requests` | Request Service |
-| `/api/v1/assistant` | Assistant Service |
-| `/api/v1/notifications` | Notification Service |
-| `/api/v1/audit` | Audit Service |
-| `/api/v1/reports` | Reporting Service |
+| `/api/v1/auth`, `/api/v1/access` | `identity-service` |
+| `/api/v1/users` | `user-service` |
+| `/api/v1/documents` | `document-service` |
+| `/api/v1/requests` | `request-service` |
+| `/api/v1/assistant` | `assistant-service` |
+| `/api/v1/notifications` | `notification-service` |
+| `/api/v1/audit` | `audit-service` |
+| `/api/v1/reports` | `reporting-service` |
+
+Automatic routing of every registered service is disabled: only the paths
+listed here are reachable from outside.
 
 ### Event contracts
 
@@ -375,7 +424,7 @@ deduplication, tracing, and versioning the same way:
   "eventVersion": 1,
   "occurredAt": "2026-11-18T10:15:00Z",
   "producer": "request-service",
-  "correlationId": "request-id-from-gateway",
+  "correlationId": "request-id-from-nginx",
   "payload": { }
 }
 ```
@@ -396,6 +445,38 @@ one request are processed in order. Each consumer group uses retry
 topics and a dead-letter topic for messages that keep failing. Event
 schemas are versioned and stored in `contracts/events/`.
 
+### File storage
+
+Uploaded files (documents, request attachments) are written through a small
+storage interface owned by each service that stores files:
+
+``` java
+public interface DocumentStorage {
+    String store(InputStream content, String filename, String contentType); // returns a storage key
+    InputStream load(String storageKey);
+    void delete(String storageKey);
+}
+```
+
+-   **Initial implementation:** `LocalFileStorage` (in the service's
+    `service/impl` package) writes files to a directory whose path comes
+    from configuration (`DOCUMENT_STORAGE_PATH`,
+    `REQUEST_ATTACHMENTS_STORAGE_PATH`), never hard-coded.
+-   **Volumes:** in Docker each owning service mounts its own named volume
+    at that path: `document-storage` (Document Service, read-only for the
+    Ingestion Worker) and `request-attachments-storage` (Request Service).
+-   **Metadata stays in the database:** the owning service stores the
+    file's metadata and storage key in its own database; the volume only
+    holds file content.
+-   **Later:** an S3-compatible backend (for example SeaweedFS or Garage)
+    can be added as another `DocumentStorage` implementation without
+    changing business code. It becomes necessary when services run on
+    several hosts, because a local volume is tied to one Docker host.
+
+MinIO was the original choice, but its official community container
+images are no longer published, so no object-storage container is used
+for now.
+
 ### Why microservices
 
 The project deliberately adopts microservices to practise distributed
@@ -412,8 +493,9 @@ This choice also brings costs that the design must address explicitly:
 | Data consistency across services | Eventual consistency through events, outbox pattern, idempotent consumers |
 | Network failures between services | Timeouts, bounded retries with backoff, fallbacks, dead-letter topics |
 | Duplicate authorization logic | A shared security convention (token claims, permission names) implemented in each service |
-| Debugging across services | Correlation IDs generated at the gateway and propagated in HTTP headers and event envelopes; structured logs |
-| Operational overhead | Docker Compose for the full stack, one Dockerfile and CI job per service, a shared service template |
+| Debugging across services | Request IDs generated at Nginx, propagated by the API Gateway in HTTP headers and event envelopes; structured logs |
+| Operational overhead | Docker Compose for the full stack, one Dockerfile and CI job per service, a shared service template, centralized configuration |
+| Finding services and their instances | Eureka discovery and client-side load balancing instead of hard-coded addresses |
 
 To keep the scope realistic, services are introduced progressively (see
 [Development Roadmap](#12-development-roadmap)). Avoid creating a
@@ -429,8 +511,12 @@ service without a concrete domain responsibility.
 | Relational database | PostgreSQL | Application data, one database per service |
 | Vector search | pgvector | Embedding storage and similarity search |
 | Messaging | Apache Kafka | Asynchronous event-driven communication between services |
-| Object storage | MinIO | Uploaded document and attachment storage |
-| API gateway / reverse proxy | Nginx | Single entry point, routing, TLS, rate limiting |
+| File storage | Local filesystem on Docker named volumes, behind a `DocumentStorage` interface | Uploaded document and attachment storage |
+| Edge proxy | Nginx | Public entry point, TLS, rate limiting, Angular static files |
+| API gateway | Spring Cloud Gateway | Internal routing by service ID, cross-cutting filters |
+| Service discovery | Spring Cloud Netflix Eureka | Service registry |
+| Load balancing | Spring Cloud LoadBalancer | Client-side balancing across instances |
+| Configuration | Spring Cloud Config | Centralized configuration |
 | Containers | Docker, Docker Compose | Reproducible development and deployment of all services |
 | Monitoring | Prometheus, Grafana | Per-service metrics and dashboards |
 | CI/CD | GitHub Actions | Automated validation and delivery per service |
@@ -444,16 +530,16 @@ implementation.
 ### 7.1 Document upload and indexing
 
 1.  An authorized staff member uploads a document through Angular.
-2.  Nginx routes the request to the **Document Service**, which
+2.  Nginx and the API Gateway route the request to the **Document Service**, which
     validates the token, the user's permissions, and the file.
-3.  The Document Service stores the file in MinIO.
+3.  The Document Service stores the file through `DocumentStorage`.
 4.  It persists the document metadata and access rules in `document_db`
     with status `PENDING`, and writes a `DocumentProcessingRequested`
     event to its outbox in the same transaction.
 5.  The outbox publisher sends the event to Kafka. The event carries the
-    object reference and the document's access metadata.
+    storage key and the document's access metadata.
 6.  The **Ingestion Worker** consumes the event and retrieves the file
-    from MinIO.
+    from the document storage volume (mounted read-only).
 7.  It extracts text, cleans it, and splits it into chunks.
 8.  It generates embeddings and stores the chunks, vectors, and access
     metadata in `ai_db` using pgvector.
@@ -570,17 +656,19 @@ Planned security controls include:
 -   Validation of incoming data in each service.
 -   Secure handling of uploaded files.
 -   Restricted access to documents and request records.
--   Internal-only services (AI Service, Ingestion Worker) reachable only
-    on the internal Docker network, never through the gateway.
--   Least-privilege credentials: one database user per service, scoped
-    MinIO bucket policies, and Kafka access control in deployed
-    environments.
+-   Internal-only services (AI Service, Ingestion Worker) and platform
+    services (Config Server, Discovery Server) reachable only on the
+    internal Docker network in deployed environments.
+-   Least-privilege access: one database user per service, one storage
+    volume per owning service (mounted read-only where only reading is
+    needed), and Kafka access control in deployed environments.
 -   Protection of secrets through environment configuration.
 -   Audit records for important operations, centralized in the Audit
     Service.
 -   Secure communication over HTTPS in deployed environments.
--   Rate limiting at the gateway and other API protections where
-    appropriate.
+-   Rate limiting at Nginx and other API protections where appropriate.
+-   Early rejection of missing, expired, or badly signed tokens at the API
+    Gateway; full permission checks still happen in each service.
 -   RAG-specific protections: content of retrieved documents is never
     treated as instructions, and authorization filters are applied
     before any passage reaches the LLM.
@@ -714,8 +802,15 @@ implementation decisions become concrete.
 ``` text
 university-platform/
 │
+├── pom.xml                        # Maven aggregator only (builds all Java modules)
+│
 ├── frontend/
 │   └── angular-app/
+│
+├── platform/
+│   ├── config-server/             # Spring Cloud Config
+│   ├── discovery-server/          # Eureka
+│   └── api-gateway/               # Spring Cloud Gateway
 │
 ├── services/
 │   ├── identity-service/          # Spring Boot — Identity & Access
@@ -747,8 +842,9 @@ university-platform/
 │   └── openapi/                   # API specifications per service
 │
 ├── infrastructure/
+│   ├── config-repo/               # Config Server files: application.yml + one file per service
 │   ├── docker/
-│   ├── nginx/                     # Gateway routing configuration
+│   ├── nginx/                     # Edge proxy configuration
 │   ├── postgres/                  # Init scripts: one database + user per service
 │   ├── kafka/                     # Topic creation scripts
 │   ├── prometheus/
@@ -769,6 +865,9 @@ university-platform/
 ├── compose.yaml
 └── README.md
 ```
+
+Each Java module is an independent Spring Boot application with its own
+Maven Wrapper and Dockerfile; the root `pom.xml` only aggregates them.
 
 Services share contracts, not code. Avoid shared libraries that contain
 domain logic; if a small technical library becomes necessary (for
@@ -820,11 +919,12 @@ Once `compose.yaml` is implemented:
 docker compose up -d
 ```
 
-Start only the infrastructure (useful when running one service from your
-IDE):
+Start only the infrastructure and platform services (useful when running
+one business service from your IDE, which then registers in Eureka like
+the others):
 
 ``` bash
-docker compose up -d postgres kafka minio nginx
+docker compose up -d postgres kafka config-server discovery-server api-gateway nginx
 ```
 
 Inspect the running services:
@@ -901,7 +1001,10 @@ python -m app.worker.main
 
 | Component | Port |
 |---|---|
-| Nginx gateway | 80 / 443 |
+| Nginx edge proxy | 80 / 443 |
+| API Gateway | 8080 |
+| Discovery Server (Eureka dashboard) | 8761 |
+| Config Server | 8888 |
 | Identity & Access Service | 8081 |
 | Document Service | 8082 |
 | Request Service | 8083 |
@@ -913,7 +1016,6 @@ python -m app.worker.main
 | AI Service | 8000 (internal) |
 | PostgreSQL | 5432 |
 | Kafka | 9092 |
-| MinIO API / console | 9000 / 9001 |
 | Prometheus | 9090 |
 | Grafana | 3000 |
 
@@ -922,9 +1024,15 @@ final implementation.
 
 ## 11. Configuration
 
-Use environment variables for configuration that differs between
-environments or contains secrets. Each service reads only the variables
-it needs.
+Configuration is split in two:
+
+-   **Non-secret settings** (routes, timeouts, logging, actuator
+    exposure, feature flags) live in `infrastructure/config-repo/`,
+    served by the Config Server: one shared `application.yml` plus one
+    `<service-id>.yml` per service.
+-   **Secrets and environment-specific values** (passwords, keys, URLs)
+    come from environment variables. Each service reads only the
+    variables it needs.
 
 An illustrative `.env.example`:
 
@@ -974,11 +1082,13 @@ AI_DB_NAME=ai_db
 AI_DB_USER=ai_user
 AI_DB_PASSWORD=change_me
 
-# Spring Boot
+# Spring Boot / Spring Cloud
 SPRING_PROFILES_ACTIVE=dev
+CONFIG_SERVER_URL=http://config-server:8888
+EUREKA_URL=http://discovery-server:8761/eureka
 
 # Security (Identity & Access Service signs tokens; others verify via JWKS)
-JWT_ISSUER=http://identity-service:8081
+JWT_ISSUER=identity-service
 JWT_JWKS_URI=http://identity-service:8081/.well-known/jwks.json
 JWT_ACCESS_TOKEN_TTL=15m
 JWT_REFRESH_TOKEN_TTL=7d
@@ -993,16 +1103,9 @@ EMBEDDING_MODEL=replace_with_embedding_model
 # Kafka
 KAFKA_BOOTSTRAP_SERVERS=kafka:9092
 
-# Object storage
-MINIO_ENDPOINT=http://minio:9000
-MINIO_DOCUMENTS_BUCKET=university-documents
-MINIO_ATTACHMENTS_BUCKET=request-attachments
-DOCUMENT_SERVICE_MINIO_ACCESS_KEY=change_me
-DOCUMENT_SERVICE_MINIO_SECRET_KEY=change_me
-REQUEST_SERVICE_MINIO_ACCESS_KEY=change_me
-REQUEST_SERVICE_MINIO_SECRET_KEY=change_me
-INGESTION_MINIO_ACCESS_KEY=change_me      # read-only on documents bucket
-INGESTION_MINIO_SECRET_KEY=change_me
+# File storage (paths inside the owning service's container, on Docker named volumes)
+DOCUMENT_STORAGE_PATH=/data/documents
+REQUEST_ATTACHMENTS_STORAGE_PATH=/data/request-attachments
 ```
 
 These values are examples, not a complete configuration. The actual
@@ -1018,9 +1121,9 @@ at a time so that the platform stays runnable at the end of each phase.
 | Phase | Scope | Expected result |
 |---|---|---|
 | 1. Requirements and design | Use cases, roles, domain model, bounded contexts, service boundaries, API and event contracts | Validated functional and technical design |
-| 2. Platform foundation | Monorepo, service template, Docker Compose, Nginx gateway, PostgreSQL with per-service databases, Kafka, MinIO, CI skeleton | Running infrastructure and an empty service deployable end to end |
+| 2. Platform foundation | Monorepo, Config Server, Discovery Server, API Gateway, Nginx edge, PostgreSQL with per-service databases, Kafka, file storage volumes, Prometheus, Grafana, CI skeleton, a throwaway sample service proving discovery and load balancing | Whole platform running in Docker; a new service only needs code and configuration |
 | 3. Identity & Access and User Profile services | Authentication, JWT issuance, JWKS, permission catalogue, dynamic roles and assignments, user registration and profiles, token verification in the service template | Secured foundation reused by every service |
-| 4. Document Service | Upload, metadata, categories, MinIO integration, outbox publishing | Usable document repository |
+| 4. Document Service | Upload, metadata, categories, `DocumentStorage` with `LocalFileStorage`, outbox publishing | Usable document repository |
 | 5. AI context: RAG foundation | Ingestion Worker (extraction, chunking, embeddings, pgvector), AI Service retrieval with access filtering | Documents indexed asynchronously and retrievable |
 | 6. Assistant Service | Conversations, LLM integration, prompts, source references, timeouts and failure handling | Conversational assistant |
 | 7. Event reliability and async services | Idempotent consumers, retry and dead-letter topics, Notification Service, Audit Service | Reliable asynchronous processing |
@@ -1042,7 +1145,7 @@ Testing will cover the system at multiple levels.
 -   **Unit tests:** validate business rules and individual components
     within each service.
 -   **Integration tests:** validate each service against real
-    PostgreSQL, Kafka, and MinIO containers.
+    PostgreSQL and Kafka containers and a temporary storage directory.
 -   **API tests:** verify request validation, response contracts, and
     authorization for every service.
 -   **Authorization tests:** for each protected endpoint, verify access
@@ -1084,7 +1187,8 @@ platform.
 Operational capabilities planned for the project:
 
 -   Health checks for every service (liveness and readiness), used by
-    Docker Compose dependency ordering.
+    Docker Compose dependency ordering: Config Server → Discovery Server →
+    API Gateway and services → Nginx.
 -   Structured logs including the correlation ID, so a single user
     action can be followed across services.
 -   Prometheus metrics exposed by every service, including Kafka
@@ -1095,7 +1199,7 @@ Operational capabilities planned for the project:
     service's directory changes, building and testing it independently.
 -   Environment-specific configuration.
 -   Persistent storage and backup considerations for each service's
-    database and for MinIO.
+    database and for the file storage volumes.
 
 A production deployment will additionally require appropriate TLS
 configuration, secret management, access restrictions, database backups,
@@ -1107,7 +1211,8 @@ Project documentation will include:
 
 -   Functional requirements and use cases.
 -   Architecture diagrams, service boundaries, and architectural
-    decision records.
+    decision records (for example, the edge proxy / API gateway split
+    and the use of service discovery).
 -   Database model and migrations for each service.
 -   REST API documentation (OpenAPI) for each service.
 -   Authentication and authorization model.
