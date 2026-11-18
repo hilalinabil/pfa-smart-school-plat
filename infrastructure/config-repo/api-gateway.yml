@@ -1,0 +1,80 @@
+# API Gateway: only what differs from application.yml.
+# Routes live here, not in Java code. Route table: README §5 "Gateway routing".
+
+spring:
+  cloud:
+    gateway:
+      server:
+        webflux:
+          # Only the routes below are reachable: no automatic route per registered service.
+          discovery:
+            locator:
+              enabled: false
+          httpclient:
+            connect-timeout: 2000      # ms
+            response-timeout: 10s
+          globalcors:
+            cors-configurations:
+              "[/api/**]":
+                allowed-origins: ${gateway.cors.allowed-origins}
+                allowed-methods: GET,POST,PUT,PATCH,DELETE,OPTIONS
+                allowed-headers: "*"
+                exposed-headers: X-Request-Id
+                allow-credentials: true
+                max-age: 3600
+          routes:
+            - id: identity-service
+              uri: lb://identity-service
+              predicates:
+                - Path=/api/v1/auth/**,/api/v1/access/**
+            - id: user-service
+              uri: lb://user-service
+              predicates:
+                - Path=/api/v1/users/**
+            - id: document-service
+              uri: lb://document-service
+              predicates:
+                - Path=/api/v1/documents/**
+            - id: request-service
+              uri: lb://request-service
+              predicates:
+                - Path=/api/v1/requests/**
+            - id: assistant-service
+              uri: lb://assistant-service
+              predicates:
+                - Path=/api/v1/assistant/**
+            - id: notification-service
+              uri: lb://notification-service
+              predicates:
+                - Path=/api/v1/notifications/**
+            - id: audit-service
+              uri: lb://audit-service
+              predicates:
+                - Path=/api/v1/audit/**
+            - id: reporting-service
+              uri: lb://reporting-service
+              predicates:
+                - Path=/api/v1/reports/**
+            # THROWAWAY: remove together with services/sample-service in Phase 3.
+            - id: sample-service
+              uri: lb://sample-service
+              predicates:
+                - Path=/api/v1/sample/**
+
+gateway:
+  cors:
+    # Production origin is set per environment; see the dev profile below.
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:}
+  # Phase 3 extension point (JwtPreCheckFilter). Disabled until JWT exists.
+  jwt-pre-check:
+    enabled: false
+
+---
+spring:
+  config:
+    activate:
+      on-profile: dev
+
+gateway:
+  cors:
+    allowed-origins: http://localhost:4200

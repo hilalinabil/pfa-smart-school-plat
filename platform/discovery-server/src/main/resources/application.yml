@@ -1,0 +1,48 @@
+# Loaded locally, not from the Config Server: the registry must start on its own.
+spring:
+  application:
+    name: discovery-server
+
+server:
+  port: ${SERVER_PORT:8761}
+  shutdown: graceful
+
+eureka:
+  instance:
+    hostname: ${EUREKA_HOSTNAME:localhost}
+  client:
+    # Standalone registry: it does not register itself or fetch the registry.
+    register-with-eureka: false
+    fetch-registry: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+logging:
+  structured:
+    format:
+      console: ecs
+
+---
+# Development: remove stopped instances within seconds. Self-preservation would
+# keep dead instances in the registry, which is the opposite of what we test locally.
+spring:
+  config:
+    activate:
+      on-profile: dev
+
+eureka:
+  server:
+    enable-self-preservation: false
+    eviction-interval-timer-in-ms: 5000
+    response-cache-update-interval-ms: 3000

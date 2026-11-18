@@ -1,0 +1,11 @@
+# Test configuration: serve the real config-repo from the repository checkout.
+spring:
+  application:
+    name: config-server
+  profiles:
+    active: native
+  cloud:
+    config:
+      server:
+        native:
+          search-locations: file:../../infrastructure/config-repo/

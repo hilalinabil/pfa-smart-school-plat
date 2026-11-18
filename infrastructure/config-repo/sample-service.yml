@@ -1,0 +1,4 @@
+# sample-service (THROWAWAY, deleted in Phase 3): only what differs from application.yml.
+# Nothing to override yet: the shared Eureka, actuator and logging settings are enough.
+info:
+  description: Throwaway service that validates discovery and load balancing.

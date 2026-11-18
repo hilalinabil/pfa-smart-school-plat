@@ -1,0 +1,17 @@
+# Test configuration. It replaces src/main/resources/application.yml on the test
+# classpath, so tests never contact a Config Server or Eureka. The real gateway
+# configuration is imported from config-repo, so the tests check the actual routes.
+spring:
+  application:
+    name: api-gateway
+  config:
+    import: "file:../../infrastructure/config-repo/api-gateway.yml"
+  cloud:
+    config:
+      enabled: false
+  profiles:
+    active: dev
+
+eureka:
+  client:
+    enabled: false

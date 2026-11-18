@@ -1,0 +1,19 @@
+# Local bootstrap only. Everything else comes from the Config Server:
+# infrastructure/config-repo/{application,sample-service}.yml
+spring:
+  application:
+    name: sample-service
+  config:
+    import: "configserver:${CONFIG_SERVER_URL:http://localhost:8888}"
+  cloud:
+    config:
+      # Never start with missing configuration: retry, then fail.
+      fail-fast: true
+      retry:
+        initial-interval: 2000
+        max-interval: 10000
+        multiplier: 1.5
+        max-attempts: 20
+
+server:
+  port: ${SERVER_PORT:8090}

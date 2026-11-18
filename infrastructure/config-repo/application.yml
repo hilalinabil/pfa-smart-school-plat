@@ -1,0 +1,54 @@
+# Shared configuration for every Config Server client.
+# Served by the Config Server (native profile) from this folder.
+# NO SECRETS HERE: use ${ENV_VAR} placeholders, resolved from the client container's environment.
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL}
+  instance:
+    prefer-ip-address: true
+    # Unique per container: HOSTNAME is the container ID in Docker.
+    instance-id: ${spring.application.name}:${HOSTNAME:local}:${server.port}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+# Structured JSON logs to stdout (ECS format). MDC entries such as requestId
+# are added automatically when present.
+logging:
+  structured:
+    format:
+      console: ecs
+
+server:
+  shutdown: graceful
+
+---
+# Development: short intervals so registration, removal and load-balancer
+# changes are visible within seconds instead of minutes.
+spring:
+  config:
+    activate:
+      on-profile: dev
+  cloud:
+    loadbalancer:
+      cache:
+        ttl: 5s
+
+eureka:
+  client:
+    registry-fetch-interval-seconds: 5
+  instance:
+    lease-renewal-interval-in-seconds: 5
+    lease-expiration-duration-in-seconds: 15

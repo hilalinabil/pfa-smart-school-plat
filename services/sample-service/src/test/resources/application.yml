@@ -1,0 +1,12 @@
+# Test configuration: replaces src/main/resources/application.yml on the test
+# classpath, so tests never contact a Config Server or Eureka.
+spring:
+  application:
+    name: sample-service
+  cloud:
+    config:
+      enabled: false
+
+eureka:
+  client:
+    enabled: false
